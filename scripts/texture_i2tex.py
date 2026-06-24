@@ -103,6 +103,15 @@ if __name__ == "__main__":
     mv_path = os.path.join(args.save_dir, f"{args.save_name}.png")
     make_image_grid(images, rows=1).save(mv_path)
 
+    views_dir = os.path.join(args.save_dir, "views")
+    os.makedirs(views_dir, exist_ok=True)
+    view_names = ["left", "front", "right", "back", "top", "bottom"]
+    for idx, img in enumerate(images):
+        view_label = view_names[idx] if idx < len(view_names) else f"view_{idx}"
+        img.save(
+            os.path.join(views_dir, f"{args.save_name}_view_{idx}_{view_label}.png")
+        )
+
     torch.cuda.empty_cache()
 
     # 2. un-project and complete texture

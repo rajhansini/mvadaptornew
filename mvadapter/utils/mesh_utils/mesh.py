@@ -502,6 +502,9 @@ def replace_mesh_texture_and_save(
     task_id: str = "",
     backend: str = "trimesh",
 ) -> None:
+    if backend == "gltflib" and not input_path.endswith((".glb", ".gltf")):
+        backend = "trimesh"
+
     if backend == "trimesh":
         replace_mesh_texture_and_save_trimesh(
             input_path,

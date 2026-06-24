@@ -38,7 +38,7 @@ class SmartPainter:
     def __init__(self, device: str):
         self.device = device
         self.cam_proj = CameraProjection(
-            pb_backend="torch-cuda", bg_remover=None, device=device
+            pb_backend="torch-native", bg_remover=None, device=device
         )
         self.ctx = NVDiffRastContextWrapper(device=self.device)
 
