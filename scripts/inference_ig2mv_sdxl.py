@@ -1,5 +1,5 @@
 import argparse
-
+import os
 import numpy as np
 import torch
 from diffusers import AutoencoderKL, DDPMScheduler, LCMScheduler, UNet2DConditionModel
@@ -8,16 +8,11 @@ from torchvision import transforms
 from tqdm import tqdm
 from transformers import AutoModelForImageSegmentation
 
-from mvadapter.models.attention_processor import DecoupledMVRowColSelfAttnProcessor2_0
 from mvadapter.pipelines.pipeline_mvadapter_i2mv_sdxl import MVAdapterI2MVSDXLPipeline
 from mvadapter.schedulers.scheduling_shift_snr import ShiftSNRScheduler
-from mvadapter.utils import make_image_grid, tensor_to_image
-from mvadapter.utils.mesh_utils import (
-    NVDiffRastContextWrapper,
-    get_orthogonal_camera,
-    load_mesh,
-    render,
-)
+from mvadapter.utils.mesh_utils import get_orthogonal_camera
+from mvadapter.utils.geometry import get_plucker_embeds_from_cameras_ortho
+from mvadapter.utils import make_image_grid
 
 
 def prepare_pipeline(
@@ -55,11 +50,9 @@ def prepare_pipeline(
         shift_scale=8.0,
         scheduler_class=scheduler_class,
     )
-    pipe.init_custom_adapter(
-        num_views=num_views, self_attn_processor=DecoupledMVRowColSelfAttnProcessor2_0
-    )
+    pipe.init_custom_adapter(num_views=num_views)
     pipe.load_custom_adapter(
-        adapter_path, weight_name="mvadapter_ig2mv_sdxl.safetensors"
+        adapter_path, weight_name="mvadapter_i2mv_sdxl.safetensors"
     )
 
     pipe.to(device=device, dtype=dtype)
@@ -121,7 +114,6 @@ def preprocess_image(image: Image.Image, height, width):
 
 def run_pipeline(
     pipe,
-    mesh_path,
     num_views,
     text,
     image,
@@ -135,45 +127,26 @@ def run_pipeline(
     negative_prompt="watermark, ugly, deformed, noisy, blurry, low contrast",
     lora_scale=1.0,
     device="cuda",
+    azimuth_deg=None,
 ):
     # Prepare cameras
+    if azimuth_deg is None:
+        azimuth_deg = [0, 45, 90, 180, 270, 315]
     cameras = get_orthogonal_camera(
-        elevation_deg=[0, 0, 0, 0, 89.99, -89.99],
+        elevation_deg=[0] * num_views,
         distance=[1.8] * num_views,
         left=-0.55,
         right=0.55,
         bottom=-0.55,
         top=0.55,
-        azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
+        azimuth_deg=[x - 90 for x in azimuth_deg],
         device=device,
     )
-    ctx = NVDiffRastContextWrapper(device=device)
 
-    mesh = load_mesh(mesh_path, rescale=True, device=device)
-    render_out = render(
-        ctx,
-        mesh,
-        cameras,
-        height=height,
-        width=width,
-        render_attr=False,
-        normal_background=0.0,
+    plucker_embeds = get_plucker_embeds_from_cameras_ortho(
+        cameras.c2w, [1.1] * num_views, width
     )
-    pos_images = tensor_to_image((render_out.pos + 0.5).clamp(0, 1), batched=True)
-    normal_images = tensor_to_image(
-        (render_out.normal / 2 + 0.5).clamp(0, 1), batched=True
-    )
-    control_images = (
-        torch.cat(
-            [
-                (render_out.pos + 0.5).clamp(0, 1),
-                (render_out.normal / 2 + 0.5).clamp(0, 1),
-            ],
-            dim=-1,
-        )
-        .permute(0, 3, 1, 2)
-        .to(device)
-    )
+    control_images = ((plucker_embeds + 1.0) / 2.0).clamp(0, 1)
 
     # Prepare image
     reference_image = Image.open(image) if isinstance(image, str) else image
@@ -203,7 +176,7 @@ def run_pipeline(
         **pipe_kwargs,
     ).images
 
-    return images, pos_images, normal_images, reference_image
+    return images, reference_image
 
 
 if __name__ == "__main__":
@@ -219,13 +192,15 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler", type=str, default=None)
     parser.add_argument("--lora_model", type=str, default=None)
     parser.add_argument("--adapter_path", type=str, default="huanngzh/mv-adapter")
-    parser.add_argument("--num_views", type=int, default=6)
     # Device
     parser.add_argument("--device", type=str, default="cuda")
     # Inference
-    parser.add_argument("--mesh", type=str, required=True)
+    parser.add_argument("--num_views", type=int, default=6)  # not used
+    parser.add_argument(
+        "--azimuth_deg", type=int, nargs="+", default=[0, 45, 90, 180, 270, 315]
+    )
     parser.add_argument("--image", type=str, required=True)
-    parser.add_argument("--text", type=str, required=False, default="high quality")
+    parser.add_argument("--text", type=str, default="high quality")
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=3.0)
     parser.add_argument("--seed", type=int, default=-1)
@@ -241,6 +216,8 @@ if __name__ == "__main__":
     parser.add_argument("--remove_bg", action="store_true", help="Remove background")
     args = parser.parse_args()
 
+    num_views = len(args.azimuth_deg)
+
     pipe = prepare_pipeline(
         base_model=args.base_model,
         vae_model=args.vae_model,
@@ -248,7 +225,7 @@ if __name__ == "__main__":
         lora_model=args.lora_model,
         adapter_path=args.adapter_path,
         scheduler=args.scheduler,
-        num_views=args.num_views,
+        num_views=num_views,
         device=args.device,
         dtype=torch.float16,
     )
@@ -269,10 +246,9 @@ if __name__ == "__main__":
     else:
         remove_bg_fn = None
 
-    images, pos_images, normal_images, reference_image = run_pipeline(
+    images, reference_image = run_pipeline(
         pipe,
-        mesh_path=args.mesh,
-        num_views=args.num_views,
+        num_views=num_views,
         text=args.text,
         image=args.image,
         height=768,
@@ -285,10 +261,25 @@ if __name__ == "__main__":
         negative_prompt=args.negative_prompt,
         device=args.device,
         remove_bg_fn=remove_bg_fn,
+        azimuth_deg=args.azimuth_deg,
     )
-    make_image_grid(images, rows=1).save(args.output)
-    make_image_grid(pos_images, rows=1).save(args.output.rsplit(".", 1)[0] + "_pos.png")
-    make_image_grid(normal_images, rows=1).save(
-        args.output.rsplit(".", 1)[0] + "_nor.png"
-    )
-    reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")
+    # Save each view image individually
+    out_dir = os.path.dirname(args.output)
+    base_name = os.path.basename(args.output).rsplit(".", 1)[0]
+    view_names = ["front", "front_right", "right", "back", "left", "front_left"]
+    
+    print("\n[LOG] Starting the saving process...")
+    print(f"[LOG] Target output directory parsed as: {out_dir}")
+    print(f"[LOG] Target file base name parsed as: {base_name}")
+    print(f"[LOG] Number of generated images found in memory: {len(images)}")
+
+    for idx, view_name in enumerate(view_names):
+        individual_img_name = f"{base_name}_view_{idx}_{view_name}.png"
+        full_save_path = os.path.join(out_dir, individual_img_name)
+        print(f"[LOG] Attempting to save view {idx} to: {full_save_path}")
+        images[idx].save(full_save_path)
+        
+    ref_save_path = os.path.join(out_dir, f"{base_name}_reference.png")
+    print(f"[LOG] Attempting to save reference image to: {ref_save_path}")
+    reference_image.save(ref_save_path)
+    print("[LOG] Saving process finished complete.\n")

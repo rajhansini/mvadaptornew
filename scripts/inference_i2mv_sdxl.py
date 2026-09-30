@@ -2,6 +2,7 @@ import argparse
 
 import numpy as np
 import torch
+import os
 from diffusers import AutoencoderKL, DDPMScheduler, LCMScheduler, UNet2DConditionModel
 from PIL import Image
 from torchvision import transforms
@@ -263,5 +264,28 @@ if __name__ == "__main__":
         remove_bg_fn=remove_bg_fn,
         azimuth_deg=args.azimuth_deg,
     )
-    make_image_grid(images, rows=1).save(args.output)
-    reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")
+    # make_image_grid(images, rows=1).save(args.output)
+    # reference_image.save(args.output.rsplit(".", 1)[0] + "_reference.png")
+    # Save each view image individually
+    # ==========================================
+    # CREATE FRAME FOLDER AND SAVE INDIVIDUALLY
+    # ==========================================
+    base_out_dir = os.path.dirname(args.output) # .../mv_adaptor_results/
+    base_name = os.path.basename(args.output).rsplit(".", 1)[0] # frame_0001
+    
+    # Create a dedicated subfolder for this specific frame
+    frame_dir = os.path.join(base_out_dir, base_name) # .../mv_adaptor_results/frame_0001/
+    os.makedirs(frame_dir, exist_ok=True)
+    
+    view_names = ["front", "front_right", "right", "back", "left", "front_left"]
+    
+    print(f"\n[LOG] Creating folder and saving views into: {frame_dir}")
+    
+    # Save the 6 views inside the new folder
+    for idx, view_name in enumerate(view_names):
+        individual_img_name = f"{base_name}_view_{idx}_{view_name}.png"
+        images[idx].save(os.path.join(frame_dir, individual_img_name))
+        
+    # Save the reference image inside the same folder
+    reference_image.save(os.path.join(frame_dir, f"{base_name}_reference.png"))
+    print("[LOG] All files saved inside the frame folder successfully.\n")

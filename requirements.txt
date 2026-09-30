@@ -16,7 +16,7 @@ timm
 kornia
 scikit-image
 sentencepiece
-git+https://github.com/NVlabs/nvdiffrast.git
+# git+https://github.com/NVlabs/nvdiffrast.git
 
 # new added for training
 pytorch-lightning
